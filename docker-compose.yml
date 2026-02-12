@@ -4,8 +4,7 @@ services:
       context: .
     container_name: kadas-monitor
     restart: unless-stopped
-    ports:
-      - "8088:8088"
+    network_mode: host
     environment:
       - THERMAL_ROOT=/host_sys/class/thermal
       - PROC_STAT_PATH=/host_proc/stat
@@ -13,7 +12,10 @@ services:
       - PROC_UPTIME_PATH=/host_proc/uptime
       - PROC_LOADAVG_PATH=/host_proc/loadavg
       - PROC_HOSTNAME_PATH=/host_etc_hostname
+      - PROC_NET_DEV_PATH=/proc/net/dev
+      - DOCKER_SOCKET_PATH=/var/run/docker.sock
     volumes:
       - /sys:/host_sys:ro
       - /proc:/host_proc:ro
       - /etc/hostname:/host_etc_hostname:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro

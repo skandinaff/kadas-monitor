@@ -224,6 +224,70 @@
     .zones {
       padding: 0.2rem 0;
     }
+
+    .running {
+      color: var(--ok);
+      border-color: rgba(105, 219, 124, 0.3);
+      background: rgba(105, 219, 124, 0.12);
+    }
+
+    .exited, .stopped {
+      color: var(--down);
+      border-color: rgba(255, 107, 107, 0.3);
+      background: rgba(255, 107, 107, 0.12);
+    }
+
+    .paused, .restarting {
+      color: var(--warm);
+      border-color: rgba(249, 199, 79, 0.3);
+      background: rgba(249, 199, 79, 0.12);
+    }
+
+    .section-title {
+      padding: 0.9rem 1rem 0.4rem;
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 600;
+    }
+
+    .net-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.8rem;
+      padding: 0.6rem;
+    }
+
+    .net-iface {
+      padding: 0.7rem 0.9rem;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(17, 39, 67, 0.4);
+    }
+
+    .net-iface h3 {
+      margin: 0 0 0.5rem;
+      font-family: "Space Mono", "Liberation Mono", monospace;
+      font-size: 0.95rem;
+      color: var(--text);
+    }
+
+    .net-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.82rem;
+      padding: 0.15rem 0;
+    }
+
+    .net-label {
+      color: var(--muted);
+    }
+
+    .net-value {
+      font-family: "Space Mono", "Liberation Mono", monospace;
+    }
   </style>
 </head>
 <body>
@@ -280,6 +344,33 @@
         </table>
       </div>
     </section>
+
+    <section class="card zones" id="dockerSection" style="display:none">
+      <h2 class="section-title">Docker Containers</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>State</th>
+              <th>CPU %</th>
+              <th>Memory</th>
+              <th>Net I/O</th>
+            </tr>
+          </thead>
+          <tbody id="dockerBody">
+            <tr><td colspan="5">Waiting for Docker data...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" id="networkSection" style="display:none">
+      <h2 class="section-title">Network Traffic</h2>
+      <div class="net-grid" id="networkGrid">
+        <p style="padding:0.5rem 0.9rem;color:var(--muted)">Waiting for network data...</p>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -295,6 +386,10 @@
     const memoryDetail = document.getElementById("memoryDetail");
     const uptime = document.getElementById("uptime");
     const zonesBody = document.getElementById("zonesBody");
+    const dockerSection = document.getElementById("dockerSection");
+    const dockerBody = document.getElementById("dockerBody");
+    const networkSection = document.getElementById("networkSection");
+    const networkGrid = document.getElementById("networkGrid");
 
     function setStatus(state) {
       liveDot.className = "status " + state;
@@ -382,6 +477,44 @@
         ? zones.map(rowMarkup).join("")
         : `<tr><td colspan="4">No thermal zones available.</td></tr>`;
 
+      // Docker containers
+      const docker = Array.isArray(data.docker) ? data.docker : [];
+      if (docker.length > 0) {
+        dockerSection.style.display = "";
+        dockerBody.innerHTML = docker.map(function(c) {
+          const stateClass = c.state || "unknown";
+          const cpu = typeof c.cpu_percent === "number" ? c.cpu_percent.toFixed(1) + "%" : "-";
+          const mem = c.mem_usage || "-";
+          const net = c.net_io || "-";
+          return `<tr>
+            <td>${c.name}</td>
+            <td><span class="badge ${stateClass}">${c.state}</span></td>
+            <td>${cpu}</td>
+            <td>${mem}</td>
+            <td>${net}</td>
+          </tr>`;
+        }).join("");
+      } else {
+        dockerSection.style.display = "none";
+      }
+
+      // Network traffic
+      const network = Array.isArray(data.network) ? data.network : [];
+      if (network.length > 0) {
+        networkSection.style.display = "";
+        networkGrid.innerHTML = network.map(function(n) {
+          return `<div class="net-iface">
+            <h3>${n.interface}</h3>
+            <div class="net-row"><span class="net-label">RX rate</span><span class="net-value">${n.rx_rate_kbps.toFixed(1)} KB/s</span></div>
+            <div class="net-row"><span class="net-label">TX rate</span><span class="net-value">${n.tx_rate_kbps.toFixed(1)} KB/s</span></div>
+            <div class="net-row"><span class="net-label">RX total</span><span class="net-value">${n.rx_total}</span></div>
+            <div class="net-row"><span class="net-label">TX total</span><span class="net-value">${n.tx_total}</span></div>
+          </div>`;
+        }).join("");
+      } else {
+        networkSection.style.display = "none";
+      }
+
       const stateRank = { normal: 0, warm: 1, hot: 2, critical: 3 };
       const hottestState = zones.reduce((acc, zone) => {
         const rank = stateRank[zone.state] ?? 0;
@@ -393,7 +526,7 @@
 
     async function refresh() {
       try {
-        const res = await fetch("/api/metrics", { cache: "no-store" });
+        const res = await fetch("api/metrics", { cache: "no-store" });
         if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
         render(data);

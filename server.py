@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import http.client
 import json
 import os
 import socket
+import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +20,8 @@ PROC_MEMINFO_PATH = Path(os.getenv("PROC_MEMINFO_PATH", "/proc/meminfo"))
 PROC_UPTIME_PATH = Path(os.getenv("PROC_UPTIME_PATH", "/proc/uptime"))
 PROC_LOADAVG_PATH = Path(os.getenv("PROC_LOADAVG_PATH", "/proc/loadavg"))
 PROC_HOSTNAME_PATH = Path(os.getenv("PROC_HOSTNAME_PATH", "/etc/hostname"))
+PROC_NET_DEV_PATH = Path(os.getenv("PROC_NET_DEV_PATH", "/proc/net/dev"))
+DOCKER_SOCKET_PATH = os.getenv("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST")
 
 
@@ -37,10 +42,25 @@ def classify_temp(temp_c: float) -> str:
     return "normal"
 
 
+class DockerSocketConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, timeout: float = 3.0) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.socket_path)
+
+
 class MetricsCollector:
     def __init__(self) -> None:
         self.prev_total: int | None = None
         self.prev_idle: int | None = None
+        self._prev_net: dict[str, tuple[float, int, int]] = {}  # iface -> (timestamp, rx, tx)
+        self._docker_cache: list[dict] = []
+        self._docker_lock = threading.Lock()
+        self._start_docker_poller()
 
     def cpu_usage_percent(self) -> float | None:
         stat = read_text(PROC_STAT_PATH)
@@ -194,6 +214,166 @@ class MetricsCollector:
             "state": state,
         }
 
+    def _start_docker_poller(self) -> None:
+        t = threading.Thread(target=self._docker_poll_loop, daemon=True)
+        t.start()
+
+    def _docker_poll_loop(self) -> None:
+        while True:
+            try:
+                data = self._fetch_docker_data()
+                with self._docker_lock:
+                    self._docker_cache = data
+            except Exception:
+                pass
+            time.sleep(5)
+
+    @staticmethod
+    def _fetch_container_stats(container_id: str) -> dict | None:
+        try:
+            conn = DockerSocketConnection(DOCKER_SOCKET_PATH, timeout=5.0)
+            conn.request("GET", f"/containers/{container_id}/stats?stream=false&one-shot=true")
+            resp = conn.getresponse()
+            if resp.status != 200:
+                conn.close()
+                return None
+            stats = json.loads(resp.read())
+            conn.close()
+        except Exception:
+            return None
+
+        # Calculate CPU %
+        cpu_delta = stats.get("cpu_stats", {}).get("cpu_usage", {}).get("total_usage", 0) - \
+                    stats.get("precpu_stats", {}).get("cpu_usage", {}).get("total_usage", 0)
+        sys_delta = stats.get("cpu_stats", {}).get("system_cpu_usage", 0) - \
+                    stats.get("precpu_stats", {}).get("system_cpu_usage", 0)
+        n_cpus = stats.get("cpu_stats", {}).get("online_cpus", 1) or 1
+        cpu_pct = round((cpu_delta / sys_delta) * n_cpus * 100.0, 1) if sys_delta > 0 else 0.0
+
+        # Memory
+        mem_stats = stats.get("memory_stats", {})
+        mem_usage = mem_stats.get("usage", 0)
+        mem_limit = mem_stats.get("limit", 0)
+
+        def fmt_mem(b: int) -> str:
+            if b >= 1073741824:
+                return f"{b / 1073741824:.2f}GiB"
+            return f"{b / 1048576:.1f}MiB"
+
+        mem_str = f"{fmt_mem(mem_usage)} / {fmt_mem(mem_limit)}" if mem_limit else fmt_mem(mem_usage)
+
+        # Network
+        networks = stats.get("networks", {})
+        rx = sum(n.get("rx_bytes", 0) for n in networks.values())
+        tx = sum(n.get("tx_bytes", 0) for n in networks.values())
+
+        def fmt_net(b: int) -> str:
+            if b >= 1073741824:
+                return f"{b / 1073741824:.2f}GB"
+            if b >= 1048576:
+                return f"{b / 1048576:.1f}MB"
+            return f"{b / 1024:.1f}kB"
+
+        net_str = f"{fmt_net(rx)} / {fmt_net(tx)}"
+
+        return {
+            "cpu_percent": cpu_pct,
+            "mem_usage": mem_str,
+            "net_io": net_str,
+        }
+
+    def _fetch_docker_data(self) -> list[dict]:
+        try:
+            conn = DockerSocketConnection(DOCKER_SOCKET_PATH)
+            conn.request("GET", "/containers/json?all=true")
+            resp = conn.getresponse()
+            if resp.status != 200:
+                conn.close()
+                return []
+            containers = json.loads(resp.read())
+            conn.close()
+        except Exception:
+            return []
+
+        results: list[dict] = []
+        for c in containers:
+            names = c.get("Names", [])
+            name = names[0].lstrip("/") if names else c.get("Id", "")[:12]
+            state = c.get("State", "unknown")
+            status_text = c.get("Status", "")
+            cid = c.get("Id", "")
+            entry: dict = {
+                "name": name,
+                "state": state,
+                "status": status_text,
+                "image": c.get("Image", ""),
+            }
+            if state == "running" and cid:
+                stats = self._fetch_container_stats(cid)
+                if stats:
+                    entry.update(stats)
+            results.append(entry)
+
+        return results
+
+    def docker_containers(self) -> list[dict]:
+        with self._docker_lock:
+            return list(self._docker_cache)
+
+    def network_traffic(self) -> list[dict]:
+        try:
+            content = PROC_NET_DEV_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return []
+
+        now = time.monotonic()
+        results: list[dict] = []
+        skip_prefixes = ("lo", "dummy", "docker", "br-", "veth")
+
+        for line in content.splitlines()[2:]:  # skip header lines
+            line = line.strip()
+            if ":" not in line:
+                continue
+            iface, data = line.split(":", 1)
+            iface = iface.strip()
+            if iface.startswith(skip_prefixes):
+                continue
+
+            fields = data.split()
+            if len(fields) < 10:
+                continue
+
+            rx_bytes = int(fields[0])
+            tx_bytes = int(fields[8])
+
+            rx_rate_kbps = 0.0
+            tx_rate_kbps = 0.0
+            prev = self._prev_net.get(iface)
+            if prev is not None:
+                dt = now - prev[0]
+                if dt > 0:
+                    rx_rate_kbps = round(((rx_bytes - prev[1]) / dt) / 1024.0, 1)
+                    tx_rate_kbps = round(((tx_bytes - prev[2]) / dt) / 1024.0, 1)
+
+            self._prev_net[iface] = (now, rx_bytes, tx_bytes)
+
+            def fmt_bytes(b: int) -> str:
+                if b >= 1073741824:
+                    return f"{b / 1073741824:.2f} GB"
+                return f"{b / 1048576:.1f} MB"
+
+            results.append({
+                "interface": iface,
+                "rx_bytes": rx_bytes,
+                "tx_bytes": tx_bytes,
+                "rx_total": fmt_bytes(rx_bytes),
+                "tx_total": fmt_bytes(tx_bytes),
+                "rx_rate_kbps": max(rx_rate_kbps, 0.0),
+                "tx_rate_kbps": max(tx_rate_kbps, 0.0),
+            })
+
+        return results
+
     def collect(self) -> dict:
         zones = self.thermal_zones()
         max_temp = max((z["temp_c"] for z in zones), default=None)
@@ -226,6 +406,8 @@ class MetricsCollector:
             "cpu_pressure": self.cpu_pressure(loadavg),
             "memory": self.memory(),
             "uptime": self.uptime(),
+            "docker": self.docker_containers(),
+            "network": self.network_traffic(),
         }
 
 
