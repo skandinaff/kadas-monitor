@@ -239,16 +239,18 @@
 
     <section class="grid">
       <article class="card kpi">
-        <h2>Max Temp</h2>
-        <p id="maxTemp">--.- C</p>
+        <h2>Temperature</h2>
+        <p id="socTemp">SOC --.- C</p>
+        <p class="kpi-sub" id="ddrTemp">DDR --.- C</p>
       </article>
       <article class="card kpi">
         <h2>CPU</h2>
         <p id="cpuUsage">--.- %</p>
       </article>
       <article class="card kpi">
-        <h2>Load Avg</h2>
-        <p id="loadAvg">--.--</p>
+        <h2>CPU Pressure</h2>
+        <p id="cpuPressure">--.- %</p>
+        <p class="kpi-sub" id="cpuPressureDetail">1m queue/core --.-- on -- cores (state: --)</p>
       </article>
       <article class="card kpi">
         <h2>Memory</h2>
@@ -284,9 +286,11 @@
     const host = document.getElementById("host");
     const updated = document.getElementById("updated");
     const liveDot = document.getElementById("liveDot");
-    const maxTemp = document.getElementById("maxTemp");
+    const socTemp = document.getElementById("socTemp");
+    const ddrTemp = document.getElementById("ddrTemp");
     const cpuUsage = document.getElementById("cpuUsage");
-    const loadAvg = document.getElementById("loadAvg");
+    const cpuPressure = document.getElementById("cpuPressure");
+    const cpuPressureDetail = document.getElementById("cpuPressureDetail");
     const memory = document.getElementById("memory");
     const memoryDetail = document.getElementById("memoryDetail");
     const uptime = document.getElementById("uptime");
@@ -318,18 +322,42 @@
       `;
     }
 
+    function zoneTemp(zones, sensorNeedle) {
+      const needle = sensorNeedle.toLowerCase();
+      const zone = zones.find((item) =>
+        typeof item.sensor === "string" && item.sensor.toLowerCase().includes(needle)
+      );
+      return zone && typeof zone.temp_c === "number" ? zone.temp_c : null;
+    }
+
     function render(data) {
       host.textContent = data.host || "";
       updated.textContent = refreshTimeText(data.timestamp_utc);
 
-      maxTemp.textContent = tempText(data.max_temp_c);
+      const zones = Array.isArray(data.zones) ? data.zones : [];
+      socTemp.textContent = `SOC ${tempText(zoneTemp(zones, "soc"))}`;
+      ddrTemp.textContent = `DDR ${tempText(zoneTemp(zones, "ddr"))}`;
+
       cpuUsage.textContent = typeof data.cpu_usage_percent === "number"
         ? data.cpu_usage_percent.toFixed(1) + " %"
         : "warming...";
 
-      loadAvg.textContent = Array.isArray(data.loadavg) && data.loadavg.length
-        ? data.loadavg.join(" / ")
-        : "--.--";
+      const pressure = data.cpu_pressure && typeof data.cpu_pressure === "object"
+        ? data.cpu_pressure
+        : null;
+      if (
+        pressure &&
+        typeof pressure.demand_percent === "number" &&
+        typeof pressure.queue_per_core_1m === "number" &&
+        typeof pressure.cores === "number"
+      ) {
+        cpuPressure.textContent = `${pressure.demand_percent.toFixed(1)} %`;
+        cpuPressureDetail.textContent =
+          `1m queue/core ${pressure.queue_per_core_1m.toFixed(2)} on ${pressure.cores} cores (state: ${pressure.state || "unknown"})`;
+      } else {
+        cpuPressure.textContent = "--.- %";
+        cpuPressureDetail.textContent = "1m queue/core --.-- on -- cores (state: --)";
+      }
 
       if (data.memory && typeof data.memory.used_percent === "number") {
         memory.textContent = data.memory.used_percent.toFixed(1) + "%";
@@ -350,7 +378,6 @@
 
       uptime.textContent = data.uptime ? data.uptime.human : "--";
 
-      const zones = Array.isArray(data.zones) ? data.zones : [];
       zonesBody.innerHTML = zones.length
         ? zones.map(rowMarkup).join("")
         : `<tr><td colspan="4">No thermal zones available.</td></tr>`;

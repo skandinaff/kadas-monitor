@@ -168,6 +168,32 @@ class MetricsCollector:
         parts.append(f"{minutes:02}m")
         return {"seconds": seconds, "human": " ".join(parts)}
 
+    def cpu_pressure(self, loadavg: list[float]) -> dict:
+        cores = os.cpu_count() or 1
+        if not loadavg or cores <= 0:
+            return {}
+
+        one_min_load = float(loadavg[0])
+        queue_per_core_1m = one_min_load / cores
+        demand_percent = round(queue_per_core_1m * 100.0, 1)
+
+        if demand_percent < 70:
+            state = "normal"
+        elif demand_percent < 100:
+            state = "busy"
+        elif demand_percent < 130:
+            state = "high"
+        else:
+            state = "overloaded"
+
+        return {
+            "cores": int(cores),
+            "one_min_load": round(one_min_load, 2),
+            "queue_per_core_1m": round(queue_per_core_1m, 2),
+            "demand_percent": demand_percent,
+            "state": state,
+        }
+
     def collect(self) -> dict:
         zones = self.thermal_zones()
         max_temp = max((z["temp_c"] for z in zones), default=None)
@@ -197,6 +223,7 @@ class MetricsCollector:
             "max_temp_c": max_temp,
             "cpu_usage_percent": cpu_usage,
             "loadavg": loadavg,
+            "cpu_pressure": self.cpu_pressure(loadavg),
             "memory": self.memory(),
             "uptime": self.uptime(),
         }
