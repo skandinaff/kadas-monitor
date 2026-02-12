@@ -96,6 +96,8 @@ class MetricsCollector:
     def memory(self) -> dict:
         total_kb = 0
         available_kb = 0
+        swap_total_kb = 0
+        swap_free_kb = 0
         try:
             with PROC_MEMINFO_PATH.open(encoding="utf-8") as handle:
                 for line in handle:
@@ -105,6 +107,10 @@ class MetricsCollector:
                         total_kb = kb
                     elif key == "MemAvailable":
                         available_kb = kb
+                    elif key == "SwapTotal":
+                        swap_total_kb = kb
+                    elif key == "SwapFree":
+                        swap_free_kb = kb
         except (OSError, ValueError):
             return {}
 
@@ -112,10 +118,34 @@ class MetricsCollector:
             return {}
 
         used_kb = max(total_kb - available_kb, 0)
+        swap_used_kb = max(swap_total_kb - swap_free_kb, 0)
+
+        ram_total_gb = round(total_kb / (1024.0 * 1024.0), 2)
+        ram_used_gb = round(used_kb / (1024.0 * 1024.0), 2)
+        ram_used_percent = round((used_kb / total_kb) * 100.0, 1)
+
+        swap_total_gb = round(swap_total_kb / (1024.0 * 1024.0), 2)
+        swap_used_gb = round(swap_used_kb / (1024.0 * 1024.0), 2)
+        swap_used_percent = round((swap_used_kb / swap_total_kb) * 100.0, 1) if swap_total_kb > 0 else 0.0
+
         return {
             "total_mb": round(total_kb / 1024.0, 1),
             "used_mb": round(used_kb / 1024.0, 1),
-            "used_percent": round((used_kb / total_kb) * 100.0, 1),
+            "used_percent": ram_used_percent,
+            "ram": {
+                "total_mb": round(total_kb / 1024.0, 1),
+                "used_mb": round(used_kb / 1024.0, 1),
+                "total_gb": ram_total_gb,
+                "used_gb": ram_used_gb,
+                "used_percent": ram_used_percent,
+            },
+            "swap": {
+                "total_mb": round(swap_total_kb / 1024.0, 1),
+                "used_mb": round(swap_used_kb / 1024.0, 1),
+                "total_gb": swap_total_gb,
+                "used_gb": swap_used_gb,
+                "used_percent": swap_used_percent,
+            },
         }
 
     def uptime(self) -> dict:

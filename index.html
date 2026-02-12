@@ -151,6 +151,16 @@
       letter-spacing: 0.02em;
     }
 
+    .kpi-sub {
+      margin: 0.35rem 0 0;
+      color: var(--muted);
+      font-family: "Space Mono", "Liberation Mono", monospace;
+      font-size: 0.76rem;
+      letter-spacing: 0.01em;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
     .table-wrap {
       overflow-x: auto;
     }
@@ -243,6 +253,7 @@
       <article class="card kpi">
         <h2>Memory</h2>
         <p id="memory">--.-%</p>
+        <p class="kpi-sub" id="memoryDetail">RAM --.--/--.-- GB | SWAP --.--/--.-- GB</p>
       </article>
       <article class="card kpi">
         <h2>Uptime</h2>
@@ -277,6 +288,7 @@
     const cpuUsage = document.getElementById("cpuUsage");
     const loadAvg = document.getElementById("loadAvg");
     const memory = document.getElementById("memory");
+    const memoryDetail = document.getElementById("memoryDetail");
     const uptime = document.getElementById("uptime");
     const zonesBody = document.getElementById("zonesBody");
 
@@ -323,6 +335,17 @@
         memory.textContent = data.memory.used_percent.toFixed(1) + "%";
       } else {
         memory.textContent = "--.-%";
+      }
+
+      const ram = data.memory && data.memory.ram ? data.memory.ram : null;
+      const swap = data.memory && data.memory.swap ? data.memory.swap : null;
+      if (
+        ram && typeof ram.used_gb === "number" && typeof ram.total_gb === "number" &&
+        swap && typeof swap.used_gb === "number" && typeof swap.total_gb === "number"
+      ) {
+        memoryDetail.textContent = `RAM ${ram.used_gb.toFixed(2)}/${ram.total_gb.toFixed(2)} GB | SWAP ${swap.used_gb.toFixed(2)}/${swap.total_gb.toFixed(2)} GB`;
+      } else {
+        memoryDetail.textContent = "RAM --.--/--.-- GB | SWAP --.--/--.-- GB";
       }
 
       uptime.textContent = data.uptime ? data.uptime.human : "--";
