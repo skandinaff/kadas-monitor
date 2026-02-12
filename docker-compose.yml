@@ -1,0 +1,19 @@
+services:
+  kadas-monitor:
+    build:
+      context: .
+    container_name: kadas-monitor
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      - THERMAL_ROOT=/host_sys/class/thermal
+      - PROC_STAT_PATH=/host_proc/stat
+      - PROC_MEMINFO_PATH=/host_proc/meminfo
+      - PROC_UPTIME_PATH=/host_proc/uptime
+      - PROC_LOADAVG_PATH=/host_proc/loadavg
+      - PROC_HOSTNAME_PATH=/host_etc_hostname
+    volumes:
+      - /sys:/host_sys:ro
+      - /proc:/host_proc:ro
+      - /etc/hostname:/host_etc_hostname:ro

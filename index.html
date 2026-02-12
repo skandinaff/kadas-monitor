@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Khadas Thermal Dashboard</title>
+  <style>
+    :root {
+      --bg0: #08111f;
+      --bg1: #112743;
+      --card: rgba(9, 25, 41, 0.74);
+      --line: rgba(129, 160, 195, 0.32);
+      --text: #edf4ff;
+      --muted: #9cb3cd;
+      --cold: #7dd3fc;
+      --warm: #f9c74f;
+      --hot: #f9844a;
+      --critical: #f94144;
+      --ok: #69db7c;
+      --warn: #ffd166;
+      --down: #ff6b6b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: "IBM Plex Sans", "Trebuchet MS", "Noto Sans", sans-serif;
+      background:
+        radial-gradient(95rem 40rem at 90% -20%, rgba(32, 83, 147, 0.42), transparent 70%),
+        radial-gradient(70rem 34rem at -10% 130%, rgba(10, 110, 102, 0.34), transparent 70%),
+        linear-gradient(145deg, var(--bg0), var(--bg1));
+      padding: 1rem;
+    }
+
+    .dashboard {
+      max-width: 980px;
+      margin: 0 auto;
+      display: grid;
+      gap: 1rem;
+      animation: rise 0.45s ease;
+    }
+
+    @keyframes rise {
+      from {
+        transform: translateY(12px);
+        opacity: 0;
+      }
+      to {
+        transform: translateY(0);
+        opacity: 1;
+      }
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      backdrop-filter: blur(7px);
+      box-shadow: 0 10px 30px rgba(2, 8, 16, 0.35);
+    }
+
+    .header {
+      padding: 1rem 1.1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .title {
+      margin: 0;
+      font-family: "Space Mono", "Liberation Mono", monospace;
+      letter-spacing: 0.03em;
+      font-size: 1.15rem;
+      text-transform: uppercase;
+    }
+
+    .meta {
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .status {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 0 rgba(105, 219, 124, 0.6);
+      animation: pulse 1.8s infinite;
+    }
+
+    @keyframes pulse {
+      0% {
+        box-shadow: 0 0 0 0 rgba(105, 219, 124, 0.58);
+      }
+      70% {
+        box-shadow: 0 0 0 11px rgba(105, 219, 124, 0);
+      }
+      100% {
+        box-shadow: 0 0 0 0 rgba(105, 219, 124, 0);
+      }
+    }
+
+    .status.warn {
+      background: var(--warn);
+      animation: none;
+    }
+
+    .status.down {
+      background: var(--down);
+      animation: none;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.8rem;
+    }
+
+    @media (min-width: 760px) {
+      .grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+    }
+
+    .kpi {
+      padding: 0.9rem;
+    }
+
+    .kpi h2 {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 600;
+    }
+
+    .kpi p {
+      margin: 0.35rem 0 0;
+      font-family: "Space Mono", "Liberation Mono", monospace;
+      font-size: 1.35rem;
+      letter-spacing: 0.02em;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 560px;
+    }
+
+    th, td {
+      padding: 0.76rem 0.9rem;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      font-size: 0.93rem;
+    }
+
+    th {
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 0.74rem;
+      letter-spacing: 0.08em;
+      font-weight: 600;
+    }
+
+    .badge {
+      border-radius: 999px;
+      display: inline-block;
+      padding: 0.2rem 0.56rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border: 1px solid transparent;
+    }
+
+    .normal {
+      color: var(--cold);
+      border-color: rgba(125, 211, 252, 0.3);
+      background: rgba(125, 211, 252, 0.12);
+    }
+
+    .warm {
+      color: var(--warm);
+      border-color: rgba(249, 199, 79, 0.3);
+      background: rgba(249, 199, 79, 0.12);
+    }
+
+    .hot {
+      color: var(--hot);
+      border-color: rgba(249, 132, 74, 0.3);
+      background: rgba(249, 132, 74, 0.12);
+    }
+
+    .critical {
+      color: var(--critical);
+      border-color: rgba(249, 65, 68, 0.3);
+      background: rgba(249, 65, 68, 0.12);
+    }
+
+    .zones {
+      padding: 0.2rem 0;
+    }
+  </style>
+</head>
+<body>
+  <main class="dashboard">
+    <section class="card header">
+      <h1 class="title">Khadas Mini Server Monitor</h1>
+      <div class="meta">
+        <span id="host"></span>
+        <span class="status" id="liveDot"></span>
+        <span id="updated">loading...</span>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card kpi">
+        <h2>Max Temp</h2>
+        <p id="maxTemp">--.- C</p>
+      </article>
+      <article class="card kpi">
+        <h2>CPU</h2>
+        <p id="cpuUsage">--.- %</p>
+      </article>
+      <article class="card kpi">
+        <h2>Load Avg</h2>
+        <p id="loadAvg">--.--</p>
+      </article>
+      <article class="card kpi">
+        <h2>Memory</h2>
+        <p id="memory">--.-%</p>
+      </article>
+      <article class="card kpi">
+        <h2>Uptime</h2>
+        <p id="uptime">--</p>
+      </article>
+    </section>
+
+    <section class="card zones">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Zone</th>
+              <th>Sensor</th>
+              <th>Temp</th>
+              <th>State</th>
+            </tr>
+          </thead>
+          <tbody id="zonesBody">
+            <tr><td colspan="4">Waiting for thermal data...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const host = document.getElementById("host");
+    const updated = document.getElementById("updated");
+    const liveDot = document.getElementById("liveDot");
+    const maxTemp = document.getElementById("maxTemp");
+    const cpuUsage = document.getElementById("cpuUsage");
+    const loadAvg = document.getElementById("loadAvg");
+    const memory = document.getElementById("memory");
+    const uptime = document.getElementById("uptime");
+    const zonesBody = document.getElementById("zonesBody");
+
+    function setStatus(state) {
+      liveDot.className = "status " + state;
+    }
+
+    function tempText(value) {
+      if (typeof value !== "number") return "--.- C";
+      return value.toFixed(1) + " C";
+    }
+
+    function refreshTimeText(iso) {
+      if (!iso) return "no updates";
+      const local = new Date(iso);
+      return "updated " + local.toLocaleTimeString();
+    }
+
+    function rowMarkup(zone) {
+      return `
+        <tr>
+          <td>${zone.zone}</td>
+          <td>${zone.sensor}</td>
+          <td>${tempText(zone.temp_c)}</td>
+          <td><span class="badge ${zone.state}">${zone.state}</span></td>
+        </tr>
+      `;
+    }
+
+    function render(data) {
+      host.textContent = data.host || "";
+      updated.textContent = refreshTimeText(data.timestamp_utc);
+
+      maxTemp.textContent = tempText(data.max_temp_c);
+      cpuUsage.textContent = typeof data.cpu_usage_percent === "number"
+        ? data.cpu_usage_percent.toFixed(1) + " %"
+        : "warming...";
+
+      loadAvg.textContent = Array.isArray(data.loadavg) && data.loadavg.length
+        ? data.loadavg.join(" / ")
+        : "--.--";
+
+      if (data.memory && typeof data.memory.used_percent === "number") {
+        memory.textContent = data.memory.used_percent.toFixed(1) + "%";
+      } else {
+        memory.textContent = "--.-%";
+      }
+
+      uptime.textContent = data.uptime ? data.uptime.human : "--";
+
+      const zones = Array.isArray(data.zones) ? data.zones : [];
+      zonesBody.innerHTML = zones.length
+        ? zones.map(rowMarkup).join("")
+        : `<tr><td colspan="4">No thermal zones available.</td></tr>`;
+
+      const stateRank = { normal: 0, warm: 1, hot: 2, critical: 3 };
+      const hottestState = zones.reduce((acc, zone) => {
+        const rank = stateRank[zone.state] ?? 0;
+        return rank > acc ? rank : acc;
+      }, 0);
+      if (hottestState >= 2) setStatus("warn");
+      else setStatus("");
+    }
+
+    async function refresh() {
+      try {
+        const res = await fetch("/api/metrics", { cache: "no-store" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        render(data);
+      } catch (_err) {
+        setStatus("down");
+        updated.textContent = "offline";
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 2500);
+  </script>
+</body>
+</html>
