@@ -524,9 +524,19 @@
       else setStatus("");
     }
 
+    function metricsEndpoint() {
+      let basePath = window.location.pathname || "/";
+      if (basePath.endsWith("/index.html")) {
+        basePath = basePath.slice(0, -"/index.html".length) + "/";
+      } else if (!basePath.endsWith("/")) {
+        basePath += "/";
+      }
+      return `${basePath}api/metrics`;
+    }
+
     async function refresh() {
       try {
-        const res = await fetch("api/metrics", { cache: "no-store" });
+        const res = await fetch(metricsEndpoint(), { cache: "no-store" });
         if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
         render(data);
