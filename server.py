@@ -3,13 +3,14 @@ import argparse
 import http.client
 import json
 import os
+import re
 import socket
 import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -23,6 +24,15 @@ PROC_HOSTNAME_PATH = Path(os.getenv("PROC_HOSTNAME_PATH", "/etc/hostname"))
 PROC_NET_DEV_PATH = Path(os.getenv("PROC_NET_DEV_PATH", "/proc/net/dev"))
 DOCKER_SOCKET_PATH = os.getenv("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST")
+PROXY_CONTAINER = os.getenv("PROXY_CONTAINER", "shared-proxy-nginx")
+WEB_ACTIVITY_WINDOW_SEC = int(os.getenv("WEB_ACTIVITY_WINDOW_SEC", "120"))
+WEB_ACTIVITY_TAIL_LINES = int(os.getenv("WEB_ACTIVITY_TAIL_LINES", "1200"))
+NGINX_TIME_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
+DOCKER_LOG_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+")
+NGINX_ACCESS_RE = re.compile(
+    r'^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<ts>[^\]]+)\]\s+"(?P<request>[^"]*)"'
+    r"\s+\d{3}\s+\S+(?:\s+\"[^\"]*\"\s+\"(?P<ua>[^\"]*)\"(?:\s+\"(?P<xff>[^\"]*)\")?)?"
+)
 
 
 def read_text(path: Path) -> str | None:
@@ -60,7 +70,10 @@ class MetricsCollector:
         self._prev_net: dict[str, tuple[float, int, int]] = {}  # iface -> (timestamp, rx, tx)
         self._docker_cache: list[dict] = []
         self._docker_lock = threading.Lock()
+        self._web_activity_cache: dict = {}
+        self._web_activity_lock = threading.Lock()
         self._start_docker_poller()
+        self._start_web_activity_poller()
 
     def cpu_usage_percent(self) -> float | None:
         stat = read_text(PROC_STAT_PATH)
@@ -320,6 +333,186 @@ class MetricsCollector:
         with self._docker_lock:
             return list(self._docker_cache)
 
+    def _start_web_activity_poller(self) -> None:
+        t = threading.Thread(target=self._web_activity_poll_loop, daemon=True)
+        t.start()
+
+    def _web_activity_poll_loop(self) -> None:
+        while True:
+            try:
+                data = self._fetch_web_activity()
+                with self._web_activity_lock:
+                    self._web_activity_cache = data
+            except Exception:
+                pass
+            time.sleep(5)
+
+    @staticmethod
+    def _site_from_path(path: str) -> str | None:
+        if path.startswith("/monitor") or path == "/api/metrics" or path == "/health":
+            return None
+        if path.startswith("/buchnotify"):
+            return "buchnotify"
+        if path.startswith("/youlite"):
+            return "youliteart"
+        if path.startswith("/lfnms") or path.startswith("/api/") or path.startswith("/data/") or path in ("/config.html", "/gallery", "/tests"):
+            return "lfnms"
+        if path.startswith("/ssparrabot"):
+            return "ssparrabot"
+        if path in ("/", "/services", "/services/"):
+            return "landing"
+        return "web"
+
+    @staticmethod
+    def _decode_docker_log_payload(payload: bytes) -> str:
+        # Docker log responses can be raw text or multiplexed stream frames.
+        if not payload:
+            return ""
+        if len(payload) < 8:
+            return payload.decode("utf-8", errors="replace")
+
+        cursor = 0
+        chunks: list[bytes] = []
+        while cursor + 8 <= len(payload):
+            header = payload[cursor:cursor + 8]
+            if header[1:4] != b"\x00\x00\x00":
+                chunks = []
+                break
+            frame_len = int.from_bytes(header[4:8], "big")
+            cursor += 8
+            if frame_len < 0 or cursor + frame_len > len(payload):
+                chunks = []
+                break
+            chunks.append(payload[cursor:cursor + frame_len])
+            cursor += frame_len
+
+        if chunks and cursor == len(payload):
+            return b"".join(chunks).decode("utf-8", errors="replace")
+        return payload.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _tail_proxy_access_logs(now_utc: datetime) -> list[str]:
+        since = max(int(now_utc.timestamp()) - WEB_ACTIVITY_WINDOW_SEC - 5, 0)
+        endpoint = (
+            f"/containers/{quote(PROXY_CONTAINER, safe='')}/logs"
+            f"?stdout=true&stderr=false&timestamps=true&since={since}&tail={WEB_ACTIVITY_TAIL_LINES}"
+        )
+        try:
+            conn = DockerSocketConnection(DOCKER_SOCKET_PATH, timeout=5.0)
+            conn.request("GET", endpoint)
+            resp = conn.getresponse()
+            if resp.status != 200:
+                conn.close()
+                return []
+            payload = resp.read()
+            conn.close()
+        except Exception:
+            return []
+
+        return MetricsCollector._decode_docker_log_payload(payload).splitlines()
+
+    @staticmethod
+    def _parse_access_log_line(line: str) -> dict | None:
+        if not line:
+            return None
+
+        line = DOCKER_LOG_TIMESTAMP_RE.sub("", line, count=1)
+        match = NGINX_ACCESS_RE.match(line)
+        if match is None:
+            return None
+
+        request = (match.group("request") or "").split()
+        if len(request) < 2:
+            return None
+        path = urlparse(request[1]).path or "/"
+
+        try:
+            seen_utc = datetime.strptime(match.group("ts"), NGINX_TIME_FORMAT).astimezone(timezone.utc)
+        except ValueError:
+            return None
+
+        ip = match.group("ip") or ""
+        xff = (match.group("xff") or "").strip()
+        if xff and xff != "-":
+            first_hop = xff.split(",", 1)[0].strip()
+            if first_hop:
+                ip = first_hop
+
+        if ip.startswith("::ffff:"):
+            ip = ip[7:]
+        if not ip or ip == "-" or ip == "::1" or ip.startswith("127."):
+            return None
+
+        return {
+            "ip": ip,
+            "path": path,
+            "seen_utc": seen_utc,
+            "user_agent": match.group("ua") or "",
+        }
+
+    def _fetch_web_activity(self) -> dict:
+        now_utc = datetime.now(timezone.utc)
+        clients: dict[str, dict] = {}
+        active_sites: set[str] = set()
+
+        for raw_line in self._tail_proxy_access_logs(now_utc):
+            event = self._parse_access_log_line(raw_line)
+            if event is None:
+                continue
+
+            age_sec = (now_utc - event["seen_utc"]).total_seconds()
+            if age_sec < 0 or age_sec > WEB_ACTIVITY_WINDOW_SEC:
+                continue
+
+            site = self._site_from_path(event["path"])
+            if site is None:
+                continue
+            active_sites.add(site)
+
+            ip = event["ip"]
+            slot = clients.get(ip)
+            if slot is None:
+                clients[ip] = {
+                    "ip": ip,
+                    "sites": {site},
+                    "last_seen_utc": event["seen_utc"].isoformat(),
+                    "_last_seen": event["seen_utc"],
+                    "user_agent": event["user_agent"],
+                }
+                continue
+
+            slot["sites"].add(site)
+            if event["seen_utc"] > slot["_last_seen"]:
+                slot["_last_seen"] = event["seen_utc"]
+                slot["last_seen_utc"] = event["seen_utc"].isoformat()
+                if event["user_agent"]:
+                    slot["user_agent"] = event["user_agent"]
+
+        normalized_clients = []
+        for entry in clients.values():
+            normalized_clients.append(
+                {
+                    "ip": entry["ip"],
+                    "sites": sorted(entry["sites"]),
+                    "last_seen_utc": entry["last_seen_utc"],
+                    "user_agent": entry["user_agent"],
+                }
+            )
+
+        normalized_clients.sort(key=lambda row: row["ip"])
+        return {
+            "active_clients": len(normalized_clients),
+            "active_sites": sorted(active_sites),
+            "clients": normalized_clients,
+            "window_sec": WEB_ACTIVITY_WINDOW_SEC,
+        }
+
+    def web_activity(self) -> dict:
+        with self._web_activity_lock:
+            if self._web_activity_cache:
+                return dict(self._web_activity_cache)
+        return {"active_clients": 0, "active_sites": [], "clients": [], "window_sec": WEB_ACTIVITY_WINDOW_SEC}
+
     def network_traffic(self) -> list[dict]:
         try:
             content = PROC_NET_DEV_PATH.read_text(encoding="utf-8")
@@ -408,6 +601,7 @@ class MetricsCollector:
             "uptime": self.uptime(),
             "docker": self.docker_containers(),
             "network": self.network_traffic(),
+            "web_activity": self.web_activity(),
         }
 
 

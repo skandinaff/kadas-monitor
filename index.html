@@ -325,6 +325,11 @@
         <h2>Uptime</h2>
         <p id="uptime">--</p>
       </article>
+      <article class="card kpi">
+        <h2>Website Viewers</h2>
+        <p id="webViewers">0</p>
+        <p class="kpi-sub" id="webSites">No active website sessions</p>
+      </article>
     </section>
 
     <section class="card zones">
@@ -365,6 +370,24 @@
       </div>
     </section>
 
+    <section class="card zones" id="webActivitySection" style="display:none">
+      <h2 class="section-title">Live Website Visitors</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Client IP</th>
+              <th>Sites</th>
+              <th>Last Seen</th>
+            </tr>
+          </thead>
+          <tbody id="webActivityBody">
+            <tr><td colspan="3">Waiting for website activity data...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card" id="networkSection" style="display:none">
       <h2 class="section-title">Network Traffic</h2>
       <div class="net-grid" id="networkGrid">
@@ -385,9 +408,13 @@
     const memory = document.getElementById("memory");
     const memoryDetail = document.getElementById("memoryDetail");
     const uptime = document.getElementById("uptime");
+    const webViewers = document.getElementById("webViewers");
+    const webSites = document.getElementById("webSites");
     const zonesBody = document.getElementById("zonesBody");
     const dockerSection = document.getElementById("dockerSection");
     const dockerBody = document.getElementById("dockerBody");
+    const webActivitySection = document.getElementById("webActivitySection");
+    const webActivityBody = document.getElementById("webActivityBody");
     const networkSection = document.getElementById("networkSection");
     const networkGrid = document.getElementById("networkGrid");
 
@@ -496,6 +523,37 @@
         }).join("");
       } else {
         dockerSection.style.display = "none";
+      }
+
+      // Website activity (from nginx access logs)
+      const webActivity = data.web_activity && typeof data.web_activity === "object"
+        ? data.web_activity
+        : null;
+      const clients = webActivity && Array.isArray(webActivity.clients) ? webActivity.clients : [];
+      const activeClientCount = webActivity && typeof webActivity.active_clients === "number"
+        ? webActivity.active_clients
+        : clients.length;
+      const activeSites = webActivity && Array.isArray(webActivity.active_sites)
+        ? webActivity.active_sites
+        : [];
+      const windowSec = webActivity && typeof webActivity.window_sec === "number"
+        ? webActivity.window_sec
+        : 120;
+
+      webViewers.textContent = String(activeClientCount);
+      webSites.textContent = activeClientCount > 0
+        ? `${activeSites.join(", ")} in last ${windowSec}s`
+        : `No active visitors in last ${windowSec}s`;
+
+      if (clients.length > 0) {
+        webActivitySection.style.display = "";
+        webActivityBody.innerHTML = clients.map(function(c) {
+          const when = c.last_seen_utc ? new Date(c.last_seen_utc).toLocaleTimeString() : "-";
+          const sites = Array.isArray(c.sites) ? c.sites.join(", ") : "-";
+          return `<tr><td>${c.ip}</td><td>${sites}</td><td>${when}</td></tr>`;
+        }).join("");
+      } else {
+        webActivitySection.style.display = "none";
       }
 
       // Network traffic
