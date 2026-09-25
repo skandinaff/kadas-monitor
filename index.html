@@ -306,6 +306,7 @@
         <h2>Temperature</h2>
         <p id="socTemp">SOC --.- C</p>
         <p class="kpi-sub" id="ddrTemp">DDR --.- C</p>
+        <p class="kpi-sub" id="nvmeTemp">NVMe --.- C</p>
       </article>
       <article class="card kpi">
         <h2>CPU</h2>
@@ -402,6 +403,7 @@
     const liveDot = document.getElementById("liveDot");
     const socTemp = document.getElementById("socTemp");
     const ddrTemp = document.getElementById("ddrTemp");
+    const nvmeTemp = document.getElementById("nvmeTemp");
     const cpuUsage = document.getElementById("cpuUsage");
     const cpuPressure = document.getElementById("cpuPressure");
     const cpuPressureDetail = document.getElementById("cpuPressureDetail");
@@ -445,9 +447,12 @@
     }
 
     function zoneTemp(zones, sensorNeedle) {
-      const needle = sensorNeedle.toLowerCase();
+      // vendor kernels name the zone soc_thermal, mainline names it cpu-thermal
+      const needles = (Array.isArray(sensorNeedle) ? sensorNeedle : [sensorNeedle])
+        .map((item) => item.toLowerCase());
       const zone = zones.find((item) =>
-        typeof item.sensor === "string" && item.sensor.toLowerCase().includes(needle)
+        typeof item.sensor === "string" &&
+        needles.some((needle) => item.sensor.toLowerCase().includes(needle))
       );
       return zone && typeof zone.temp_c === "number" ? zone.temp_c : null;
     }
@@ -457,8 +462,13 @@
       updated.textContent = refreshTimeText(data.timestamp_utc);
 
       const zones = Array.isArray(data.zones) ? data.zones : [];
-      socTemp.textContent = `SOC ${tempText(zoneTemp(zones, "soc"))}`;
+      socTemp.textContent = `SOC ${tempText(zoneTemp(zones, ["soc", "cpu"]))}`;
       ddrTemp.textContent = `DDR ${tempText(zoneTemp(zones, "ddr"))}`;
+      // диск может пропасть с PCIe при перегреве — это надо видеть, а не прятать за прочерком
+      const nvmeC = zoneTemp(zones, "nvme");
+      nvmeTemp.textContent = nvmeC === null
+        ? (data.nvme_present === false ? "NVMe not detected" : "NVMe --.- C")
+        : `NVMe ${tempText(nvmeC)}`;
 
       cpuUsage.textContent = typeof data.cpu_usage_percent === "number"
         ? data.cpu_usage_percent.toFixed(1) + " %"

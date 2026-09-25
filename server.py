@@ -16,6 +16,7 @@ from urllib.parse import quote, urlparse
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
 THERMAL_ROOT = Path(os.getenv("THERMAL_ROOT", "/sys/class/thermal"))
+HWMON_ROOT = Path(os.getenv("HWMON_ROOT", "/sys/class/hwmon"))
 PROC_STAT_PATH = Path(os.getenv("PROC_STAT_PATH", "/proc/stat"))
 PROC_MEMINFO_PATH = Path(os.getenv("PROC_MEMINFO_PATH", "/proc/meminfo"))
 PROC_UPTIME_PATH = Path(os.getenv("PROC_UPTIME_PATH", "/proc/uptime"))
@@ -42,14 +43,32 @@ def read_text(path: Path) -> str | None:
         return None
 
 
-def classify_temp(temp_c: float) -> str:
-    if temp_c >= 85:
+SANE_TEMP_MAX_C = 200.0
+
+
+def classify_temp(temp_c: float, warn_c: float = 75.0, crit_c: float = 85.0) -> str:
+    if temp_c >= crit_c:
         return "critical"
-    if temp_c >= 75:
+    if temp_c >= warn_c:
         return "hot"
-    if temp_c >= 60:
+    if temp_c >= warn_c - 15.0:
         return "warm"
     return "normal"
+
+
+def read_temp_c(path: Path) -> float | None:
+    """Читает sysfs-температуру. Отбрасывает незаданные пороги вроде 65261850."""
+    raw = read_text(path)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    temp_c = value / 1000.0 if abs(value) > SANE_TEMP_MAX_C else value
+    if not -50.0 <= temp_c <= SANE_TEMP_MAX_C:
+        return None
+    return temp_c
 
 
 class DockerSocketConnection(http.client.HTTPConnection):
@@ -124,6 +143,46 @@ class MetricsCollector:
                     "state": classify_temp(temp_c),
                 }
             )
+        return zones
+
+    def nvme_zones(self) -> list[dict]:
+        """Температура NVMe через hwmon. Диск может пропасть с шины PCIe,
+        поэтому отсутствие узла — штатная ситуация, а не ошибка."""
+        zones: list[dict] = []
+        try:
+            hwmons = sorted(HWMON_ROOT.glob("hwmon*"))
+        except OSError:
+            return zones
+
+        for hwmon in hwmons:
+            if (read_text(hwmon / "name") or "") != "nvme":
+                continue
+            # пороги берём у самого накопителя, а не угадываем
+            warn_c = read_temp_c(hwmon / "temp1_max")
+            crit_c = read_temp_c(hwmon / "temp1_crit")
+            try:
+                inputs = sorted(hwmon.glob("temp*_input"))
+            except OSError:
+                continue
+            for probe in inputs:
+                temp_c = read_temp_c(probe)
+                if temp_c is None:
+                    continue
+                label = read_text(probe.parent / probe.name.replace("_input", "_label"))
+                zones.append(
+                    {
+                        "zone": hwmon.name,
+                        "sensor": f"nvme ({label})" if label else f"nvme ({probe.stem})",
+                        "temp_c": round(temp_c, 1),
+                        "state": classify_temp(
+                            temp_c,
+                            warn_c if warn_c is not None else 75.0,
+                            crit_c if crit_c is not None else 85.0,
+                        ),
+                        "warn_c": round(warn_c, 1) if warn_c is not None else None,
+                        "crit_c": round(crit_c, 1) if crit_c is not None else None,
+                    }
+                )
         return zones
 
     def memory(self) -> dict:
@@ -569,6 +628,8 @@ class MetricsCollector:
 
     def collect(self) -> dict:
         zones = self.thermal_zones()
+        nvme = self.nvme_zones()
+        zones.extend(nvme)
         max_temp = max((z["temp_c"] for z in zones), default=None)
         cpu_usage = self.cpu_usage_percent()
         loadavg = []
@@ -593,6 +654,7 @@ class MetricsCollector:
             "host": host_name,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "zones": zones,
+            "nvme_present": bool(nvme),
             "max_temp_c": max_temp,
             "cpu_usage_percent": cpu_usage,
             "loadavg": loadavg,
