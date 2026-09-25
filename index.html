@@ -149,6 +149,9 @@
       font-family: "Space Mono", "Liberation Mono", monospace;
       font-size: 1.35rem;
       letter-spacing: 0.02em;
+      /* тот же line-height, что и у .kpi-sub, иначе просветы между
+         основной строкой и подстрочными выглядят разными */
+      line-height: 1.4;
     }
 
     .kpi-sub {
@@ -389,6 +392,25 @@
       </div>
     </section>
 
+    <section class="card" id="diskSection" style="display:none">
+      <h2 class="section-title">Disk Activity</h2>
+      <div class="net-grid" id="diskGrid"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Who</th>
+              <th>Device</th>
+              <th>Write</th>
+              <th>Read</th>
+              <th>Written</th>
+            </tr>
+          </thead>
+          <tbody id="ioWritersBody"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card" id="networkSection" style="display:none">
       <h2 class="section-title">Network Traffic</h2>
       <div class="net-grid" id="networkGrid">
@@ -417,11 +439,34 @@
     const dockerBody = document.getElementById("dockerBody");
     const webActivitySection = document.getElementById("webActivitySection");
     const webActivityBody = document.getElementById("webActivityBody");
+    const diskSection = document.getElementById("diskSection");
+    const diskGrid = document.getElementById("diskGrid");
+    const ioWritersBody = document.getElementById("ioWritersBody");
     const networkSection = document.getElementById("networkSection");
     const networkGrid = document.getElementById("networkGrid");
 
     function setStatus(state) {
       liveDot.className = "status " + state;
+    }
+
+    // имена приходят из cgroup и от Docker — экранируем, прежде чем класть в HTML
+    function esc(value) {
+      return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+    function rateText(kbps) {
+      if (typeof kbps !== "number") return "--";
+      if (kbps >= 1024) return (kbps / 1024).toFixed(1) + " MB/s";
+      return kbps.toFixed(1) + " KB/s";
+    }
+
+    function deviceKindText(kind) {
+      if (kind === "emmc") return "eMMC - limited write endurance";
+      if (kind === "ssd") return "NVMe SSD";
+      if (kind === "zram") return "zram - RAM, no wear";
+      return "";
     }
 
     function tempText(value) {
@@ -567,6 +612,35 @@
       }
 
       // Network traffic
+      const disks = Array.isArray(data.disk_io) ? data.disk_io : [];
+      if (disks.length > 0) {
+        diskSection.style.display = "";
+        diskGrid.innerHTML = disks.map(function(d) {
+          return `<div class="net-iface">
+            <h3>${esc(d.device)}</h3>
+            <div class="net-row"><span class="net-label">${esc(deviceKindText(d.kind))}</span><span class="net-value"></span></div>
+            <div class="net-row"><span class="net-label">Write</span><span class="net-value">${rateText(d.write_kbps)}</span></div>
+            <div class="net-row"><span class="net-label">Read</span><span class="net-value">${rateText(d.read_kbps)}</span></div>
+            <div class="net-row"><span class="net-label">Written total</span><span class="net-value">${d.write_total_gb} GB</span></div>
+          </div>`;
+        }).join("");
+
+        const writers = Array.isArray(data.io_writers) ? data.io_writers : [];
+        ioWritersBody.innerHTML = writers.length
+          ? writers.map(function(w) {
+              return `<tr>
+                <td>${esc(w.who)}</td>
+                <td>${esc(w.device)}</td>
+                <td>${rateText(w.write_kbps)}</td>
+                <td>${rateText(w.read_kbps)}</td>
+                <td>${w.write_total_mb} MB</td>
+              </tr>`;
+            }).join("")
+          : `<tr><td colspan="5">No I/O accounted yet.</td></tr>`;
+      } else {
+        diskSection.style.display = "none";
+      }
+
       const network = Array.isArray(data.network) ? data.network : [];
       if (network.length > 0) {
         networkSection.style.display = "";

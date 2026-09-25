@@ -23,6 +23,11 @@ PROC_UPTIME_PATH = Path(os.getenv("PROC_UPTIME_PATH", "/proc/uptime"))
 PROC_LOADAVG_PATH = Path(os.getenv("PROC_LOADAVG_PATH", "/proc/loadavg"))
 PROC_HOSTNAME_PATH = Path(os.getenv("PROC_HOSTNAME_PATH", "/etc/hostname"))
 PROC_NET_DEV_PATH = Path(os.getenv("PROC_NET_DEV_PATH", "/proc/net/dev"))
+PROC_DISKSTATS_PATH = Path(os.getenv("PROC_DISKSTATS_PATH", "/proc/diskstats"))
+CGROUP_ROOT = Path(os.getenv("CGROUP_ROOT", "/sys/fs/cgroup"))
+IO_TOP_N = int(os.getenv("IO_TOP_N", "8"))
+# loop/ram-устройства в учёте записи только мешают
+DISK_SKIP_PREFIXES = ("loop", "ram", "dm-", "md")
 DOCKER_SOCKET_PATH = os.getenv("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST")
 PROXY_CONTAINER = os.getenv("PROXY_CONTAINER", "shared-proxy-nginx")
@@ -87,6 +92,8 @@ class MetricsCollector:
         self.prev_total: int | None = None
         self.prev_idle: int | None = None
         self._prev_net: dict[str, tuple[float, int, int]] = {}  # iface -> (timestamp, rx, tx)
+        self._prev_disk: dict[str, tuple[float, int, int]] = {}  # dev -> (t, read_sectors, write_sectors)
+        self._prev_cgio: dict[tuple[str, str], tuple[float, int, int]] = {}  # (cgroup, dev) -> (t, rbytes, wbytes)
         self._docker_cache: list[dict] = []
         self._docker_lock = threading.Lock()
         self._web_activity_cache: dict = {}
@@ -375,6 +382,7 @@ class MetricsCollector:
             status_text = c.get("Status", "")
             cid = c.get("Id", "")
             entry: dict = {
+                "id": cid,
                 "name": name,
                 "state": state,
                 "status": status_text,
@@ -626,6 +634,146 @@ class MetricsCollector:
 
         return results
 
+    def _device_map(self) -> dict[str, str]:
+        """major:minor -> имя устройства, из diskstats."""
+        devices: dict[str, str] = {}
+        try:
+            content = PROC_DISKSTATS_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return devices
+        for line in content.splitlines():
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            devices[f"{fields[0]}:{fields[1]}"] = fields[2]
+        return devices
+
+    def disk_io(self) -> list[dict]:
+        """Чтение и запись по каждому физическому устройству."""
+        try:
+            content = PROC_DISKSTATS_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return []
+
+        now = time.monotonic()
+        results: list[dict] = []
+        for line in content.splitlines():
+            fields = line.split()
+            if len(fields) < 10:
+                continue
+            name = fields[2]
+            if name.startswith(DISK_SKIP_PREFIXES):
+                continue
+            # разделы и служебные boot-области пропускаем,
+            # суммарная статистика есть у самого диска
+            if name.startswith("mmcblk") and ("p" in name[6:] or "boot" in name):
+                continue
+            if name.startswith("nvme") and "p" in name.split("n")[-1]:
+                continue
+            try:
+                read_sectors = int(fields[5])
+                write_sectors = int(fields[9])
+            except ValueError:
+                continue
+
+            read_kbps = write_kbps = 0.0
+            prev = self._prev_disk.get(name)
+            if prev is not None:
+                dt = now - prev[0]
+                if dt > 0:
+                    read_kbps = round(((read_sectors - prev[1]) * 512 / dt) / 1024.0, 1)
+                    write_kbps = round(((write_sectors - prev[2]) * 512 / dt) / 1024.0, 1)
+            self._prev_disk[name] = (now, read_sectors, write_sectors)
+
+            results.append({
+                "device": name,
+                "kind": "zram" if name.startswith("zram") else ("emmc" if name.startswith("mmcblk") else "ssd"),
+                "read_total_gb": round(read_sectors * 512 / 1073741824, 2),
+                "write_total_gb": round(write_sectors * 512 / 1073741824, 2),
+                "read_kbps": max(read_kbps, 0.0),
+                "write_kbps": max(write_kbps, 0.0),
+            })
+        return results
+
+    def _cgroup_label(self, cgroup_dir: Path, id_to_name: dict[str, str]) -> str:
+        name = cgroup_dir.name
+        if name.startswith("docker-") and name.endswith(".scope"):
+            cid = name[len("docker-"):-len(".scope")]
+            return id_to_name.get(cid, f"docker:{cid[:12]}")
+        if name.endswith(".service"):
+            return name[:-len(".service")]
+        if name.endswith(".scope"):
+            return name[:-len(".scope")]
+        return name
+
+    def io_writers(self) -> list[dict]:
+        """Кто и на какой диск пишет — из cgroup v2 io.stat.
+
+        Именно io.stat, а не /proc/<pid>/io: он даёт разбивку по устройствам
+        и читается без CAP_SYS_PTRACE, которого у контейнера нет.
+        """
+        devices = self._device_map()
+        id_to_name = {c["id"]: c["name"] for c in self.docker_containers() if c.get("id")}
+
+        now = time.monotonic()
+        rows: list[dict] = []
+        patterns = ("system.slice/*.scope", "system.slice/*.service", "user.slice")
+        seen: set[Path] = set()
+        for pattern in patterns:
+            try:
+                candidates = list(CGROUP_ROOT.glob(pattern))
+            except OSError:
+                continue
+            for cgroup_dir in candidates:
+                if cgroup_dir in seen:
+                    continue
+                seen.add(cgroup_dir)
+                content = read_text(cgroup_dir / "io.stat")
+                if not content:
+                    continue
+                label = self._cgroup_label(cgroup_dir, id_to_name)
+                for line in content.splitlines():
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    devno = parts[0]
+                    stats: dict[str, int] = {}
+                    for item in parts[1:]:
+                        if "=" not in item:
+                            continue
+                        key, _, value = item.partition("=")
+                        try:
+                            stats[key] = int(value)
+                        except ValueError:
+                            pass
+                    rbytes = stats.get("rbytes", 0)
+                    wbytes = stats.get("wbytes", 0)
+                    device = devices.get(devno, devno)
+                    if device.startswith(DISK_SKIP_PREFIXES):
+                        continue
+
+                    key = (label, device)
+                    read_kbps = write_kbps = 0.0
+                    prev = self._prev_cgio.get(key)
+                    if prev is not None:
+                        dt = now - prev[0]
+                        if dt > 0:
+                            read_kbps = round(((rbytes - prev[1]) / dt) / 1024.0, 1)
+                            write_kbps = round(((wbytes - prev[2]) / dt) / 1024.0, 1)
+                    self._prev_cgio[key] = (now, rbytes, wbytes)
+
+                    rows.append({
+                        "who": label,
+                        "device": device,
+                        "write_total_mb": round(wbytes / 1048576, 1),
+                        "read_total_mb": round(rbytes / 1048576, 1),
+                        "write_kbps": max(write_kbps, 0.0),
+                        "read_kbps": max(read_kbps, 0.0),
+                    })
+
+        rows.sort(key=lambda r: (r["write_kbps"], r["write_total_mb"]), reverse=True)
+        return rows[:IO_TOP_N]
+
     def collect(self) -> dict:
         zones = self.thermal_zones()
         nvme = self.nvme_zones()
@@ -663,6 +811,8 @@ class MetricsCollector:
             "uptime": self.uptime(),
             "docker": self.docker_containers(),
             "network": self.network_traffic(),
+            "disk_io": self.disk_io(),
+            "io_writers": self.io_writers(),
             "web_activity": self.web_activity(),
         }
 
